@@ -1,10 +1,16 @@
+# =======================================================================
 # coding: utf-8
+# Get product's amazon reviews for automatically, for study purpose only.
+# Only for Amazon website for US.
+# Updates will be release here:
+#   https://github.com/wtangxyz/python/tree/master/amazon_review
 # 
+# This is a Python3 script, will not work with Python2.
+# =======================================================================
 import time
 import os
 import sys
 import re
-import urllib
 import gzip
 import datetime
 import urllib.request
@@ -42,16 +48,7 @@ class HtmlDownloadMaster(object):
 
         self.cookiejar = cookiejar
         self.opener = opener
-        self.fetched_html = {}
         self.cookie_is_saved = False
-
-
-    def get_html(self, url):
-        if url in self.fetched_html:
-            html = self.fetched_html[url]
-        else:
-            html = self.get_remote_html(url)
-        return html 
         
    
     def get_remote_html(self, url):
@@ -63,7 +60,6 @@ class HtmlDownloadMaster(object):
                 pass
         else:
             raise Exception(e)
-
         if not self.cookie_is_saved:
             self.cookiejar.save(ignore_discard=True, ignore_expires=True)
             self.cookie_is_saved = True
@@ -71,8 +67,6 @@ class HtmlDownloadMaster(object):
             html = gzip.decompress(rsp).decode()
         except:
             html = rsp.decode()
-
-        self.fetched_html[url] = html
         return html
 
 
@@ -102,7 +96,7 @@ class ReviewsFecher(object):
 
     def get_total_page_numbers(self):
         print('getting first review page ...')
-        first_page_html = self.downloader.get_html(self.first_page_url)
+        first_page_html = self.downloader.get_remote_html(self.first_page_url)
         tree = lxml.html.fromstring(first_page_html)
         page_butten_list = tree.xpath("//*[@id='cm_cr-pagination_bar']/ul/li//text()")
         if len(page_butten_list) == 0:
@@ -153,7 +147,7 @@ class ReviewsFecher(object):
 
     def fetch_reviews_from_page(self, page):
         url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.first_page_url)
-        html = self.downloader.get_html(url)
+        html = self.downloader.get_remote_html(url)
         review_list = self.fetch_reviews_from_html(html)
         return review_list
 
@@ -464,41 +458,11 @@ class ReviewsStatisticsAndSaver(object):
         self.result_book.save(save_name)
 
 
-def get_reviews_for_cable_modem():
-    ''' test '''
-    cr700_url = 'https://www.amazon.com/TP-Link-Certified-Communications-Archer-CR700/dp/B012I96J3W/ref=sr_1_1?ie=UTF8&qid=1490972370&sr=8-1&keywords=cr700'
-    tc7610_7620_url = 'https://www.amazon.com/TP-Link-343Mbps-Certified-Spectrum-TC-7610-E/dp/B01CH8ZNJ0/ref=sr_1_1?ie=UTF8&qid=1491060700&sr=8-1&keywords=tc-7610'
-    tcw7960_url = 'https://www.amazon.com/TP-Link-Cable-Modem-Router-Communications/dp/B01EO5A3RQ/ref=sr_1_1?ie=UTF8&qid=1491061952&sr=8-1&keywords=tc-w7960'
-    tc7620_only_url = 'https://www.amazon.com/TP-Link-Download-Certified-Communications-TC-7620/product-reviews/B01CVOLKKQ/ref=cm_cr_arp_d_viewopt_fmt?ie=UTF8&reviewerType=avp_only_reviews&formatType=current_format&pageNumber=1&sortBy=helpful'
-    tc7610_only_url = 'https://www.amazon.com/TP-Link-343Mbps-Certified-Spectrum-TC-7610/product-reviews/B01CH8ZNJ0/ref=cm_cr_arp_d_viewopt_fmt?ie=UTF8&reviewerType=all_reviews&pageNumber=1&formatType=current_format'
-    
-    for url, product_name in [(cr700_url, 'CR700'), (tc7610_7620_url, 'TC-7610_7620'), (tcw7960_url, 'TC-W7960'), 
-                          (tc7620_only_url, 'TC-7620'), (tc7610_only_url, 'TC-7610')]:
-        start_time = datetime.datetime.now()
-        print('Start at %s'  % str(start_time).split('.')[0])
-        fetcher = ReviewsFecher(url)
-        if not product_name.strip():
-            product_name = fetcher.get_product_name()
-        print('Product: %s'  % product_name)
-        review_list = fetcher.fetch_all_reviews()
-        master = ReviewsStatisticsAndSaver(review_list)
-        master.save_all_to_excel(product_name)
-        master.show_statistics()
-        end_time = datetime.datetime.now()
-        duration = end_time - start_time
-        total_seconds = duration.days*24*3600 + duration.seconds
-        hours = int(total_seconds/3600)
-        mins = int((total_seconds - hours*3600) / 60)
-        seconds = total_seconds - hours*3600 - mins*60
-        print('End at %s, duration is %sh %smin %ss.\n'  % (str(end_time).split('.')[0], hours, mins, seconds))
-
-
 if __name__=="__main__":
-    # get_reviews_for_cable_modem()
     product_name = input('Product name(optional): ').strip()
     url = input('Product page url or reviews page url: ').strip()
-    # url = 'https://www.amazon.com/TP-Link-Certified-Communications-Archer-CR700/dp/B012I96J3W/ref=sr_1_1?ie=UTF8&qid=1490972370&sr=8-1&keywords=cr700'
     # product_name = ''
+    # url = 'https://www.amazon.com/Apple-Factory-Unlocked-Internal-Smartphone/dp/B00NQGP42Y/ref=sr_1_4?s=wireless&ie=UTF8&qid=1491201041&sr=1-4&keywords=iphone'
     start_time = datetime.datetime.now()
     print('Start at %s'  % str(start_time).split('.')[0])
     fetcher = ReviewsFecher(url)
