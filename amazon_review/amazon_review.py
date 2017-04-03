@@ -1,4 +1,5 @@
 # coding: utf-8
+# 
 import time
 import os
 import sys
@@ -17,28 +18,40 @@ MAX_CONNECTION = 100
 CONNECTION_TIMEOUT = 5
 CONNECTION_RETRIES = 10
 
-COOKIE_FILE_NAME = 'cookie.txt'
-RESULT_FILE_NAME = 'result.xls'
+socket.setdefaulttimeout(CONNECTION_TIMEOUT)
 
 class HtmlDownloadMaster(object):
+
+    COOKIE_FILE_NAME = 'cookie.txt'
+    REQUEST_HEADER = {'User-Agent':"Mozilla/5.0 (X11; Linux x86_64; rv:45.0) Gecko/20100101 Firefox/45.0",
+                      'Accept':'image/png,image/*;q=0.8,*/*;q=0.5',
+                      'Accept-Charset':'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+                      'Accept-Encoding':'gzip, deflate',
+                      'Connection':'keep-alive',
+                      'DNT':'1',
+                      'Host': 'www.amazon.cn'}
+
     def __init__(self):
-        head = {'User-Agent':"Mozilla/5.0 (X11; Linux x86_64; rv:45.0) Gecko/20100101 Firefox/45.0",
-                'Accept':'image/png,image/*;q=0.8,*/*;q=0.5',
-                'Accept-Charset':'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
-                'Accept-Encoding':'gzip, deflate',
-                'Connection':'keep-alive',
-                'DNT':'1',
-                'Host': 'www.amazon.cn'}
-        self.cookiejar = http.cookiejar.MozillaCookieJar(COOKIE_FILE_NAME)
-        if os.path.exists(COOKIE_FILE_NAME):
-            self.cookiejar.load(COOKIE_FILE_NAME, ignore_discard=True, ignore_expires=True)
-        self.handler = urllib.request.HTTPCookieProcessor(self.cookiejar)
-        self.opener = urllib.request.build_opener(self.handler)
-        self.headers = [i for i  in head.items()]
-        self.opener.addheaders = self.headers
+        cookiejar = http.cookiejar.MozillaCookieJar(self.COOKIE_FILE_NAME)
+        if os.path.exists(self.COOKIE_FILE_NAME):
+            cookiejar.load(self.COOKIE_FILE_NAME, ignore_discard=True, ignore_expires=True)
+        handler = urllib.request.HTTPCookieProcessor(cookiejar)
+        opener = urllib.request.build_opener(handler)
+        headers = [i for i  in self.REQUEST_HEADER.items()]
+        opener.addheaders = headers
+
+        self.cookiejar = cookiejar
+        self.opener = opener
+        self.fetched_html = {}
         self.cookie_is_saved = False
 
-        socket.setdefaulttimeout(CONNECTION_TIMEOUT)
+
+    def get_html(self, url):
+        if url in self.fetched_html:
+            html = self.fetched_html[url]
+        else:
+            html = self.get_remote_html(url)
+        return html 
         
    
     def get_remote_html(self, url):
@@ -50,6 +63,7 @@ class HtmlDownloadMaster(object):
                 pass
         else:
             raise Exception(e)
+
         if not self.cookie_is_saved:
             self.cookiejar.save(ignore_discard=True, ignore_expires=True)
             self.cookie_is_saved = True
@@ -57,71 +71,101 @@ class HtmlDownloadMaster(object):
             html = gzip.decompress(rsp).decode()
         except:
             html = rsp.decode()
+
+        self.fetched_html[url] = html
         return html
-        
-        
-class GetReviews(object):
-    def __init__(self):
+
+
+class ReviewsFecher(object):
+    def __init__(self, url):
         self.downloader = HtmlDownloadMaster()
         self.review_list = []
         self.failed_download_pages = []
-        self.product_name = ''
-        self.result_book = xlwt.Workbook()
 
 
-    def get_url_type(self, url):
-        ''' return 'review' if url is for review page,
-            or 'product' if url is for product page. 
-        '''
-        url_type = 'reviews' if 'product-reviews' in url else 'product'
-        return url_type
-
-
-    def get_first_review_page_url(self, url):
-        ''' get reviews url from product page '''
         url_part_see_all_reviews = 'ref=cm_cr_dp_d_show_all_top?ie=UTF8&reviewerType=avp_only_reviews'
         url_part_sort_by_recent = 'ref=cm_cr_arp_d_viewopt_fmt?ie=UTF8&reviewerType=avp_only_reviews&formatType=all_formats&pageNumber=1&sortBy=recent'
         url_part_sort_by_helpful = url_part_sort_by_recent.replace('sortBy=recent', 'sortBy=helpful')
         url_part_sort_by_current = url_part_sort_by_recent.replace('formatType=all_formats', 'formatType=current_format')
-        url_type = self.get_url_type(url)
-        if url_type == 'product':
-            print('getting product page ...')
+        if 'product-reviews' in url:
+            first_page_url = url.replace(url_part_sort_by_helpful, url_part_sort_by_recent)
+        else:
+            print('Getting product page ...')
             html = self.downloader.get_remote_html(url)
             tree = lxml.html.fromstring(html)
             xpath = "//a[@id='dp-summary-see-all-reviews']//@href"
             see_all_reviews_relative_url = tree.xpath(xpath)[0]
             see_all_reviews_url = "http://www.amazon.com%s"  % see_all_reviews_relative_url
-            first_review_page_url = see_all_reviews_url.replace(url_part_see_all_reviews, url_part_sort_by_recent)
-        else:
-            first_review_page_url = url.replace(url_part_sort_by_helpful, url_part_sort_by_recent)
-        return first_review_page_url
+            first_page_url = see_all_reviews_url.replace(url_part_see_all_reviews, url_part_sort_by_recent)
+        self.first_page_url = first_page_url
 
 
-    def get_product_name_from_url(self, url):
-        product_name = url.split('/')[3]
-        self.product_name = product_name
+    def get_total_page_numbers(self):
+        print('getting first review page ...')
+        first_page_html = self.downloader.get_html(self.first_page_url)
+        tree = lxml.html.fromstring(first_page_html)
+        page_butten_list = tree.xpath("//*[@id='cm_cr-pagination_bar']/ul/li//text()")
+        if len(page_butten_list) == 0:
+            return 1
+        page_butten_list = [i.replace(',', '') for i in page_butten_list]
+        page_butten_list = [i for i in page_butten_list if i.strip().isdigit()]
+        page_butten_list = [int(i) for i in page_butten_list]
+        total_page_numbers = max(page_butten_list)
+        return total_page_numbers
+
+
+    def get_product_name(self):
+        product_name = self.first_page_url.split('/')[3]
         return product_name
 
-        
-    def get_all_reviews(self, url):
-        print('Product: %s'  % self.get_product_name_from_url(url))
-        first_review_page_url = self.get_first_review_page_url(url)
-        print('getting reviews page 1 ...')
-        first_review_page_html = self.downloader.get_remote_html(first_review_page_url)
-        total_review_page_number = self.get_total_review_page_number_from_html(first_review_page_html)
-        print('total review page is %s.'  % total_review_page_number)
-        
-        reviews_in_first_page = self.get_review_list_from_html(first_review_page_html)
-        self.review_list.extend(reviews_in_first_page)
 
-        if total_review_page_number == 1:
-            return self.review_list
+    def fetch_reviews_from_html(self, html):
+        item_xpath = "//div[starts-with(@id, 'customer_review-')]"
+        star_xpath = ".//a[@class='a-link-normal' and starts-with(@href, '/gp/customer-reviews/')]//@title"
+        title_xpath = ".//a[contains(@class, 'review-title')]//text()"
+        author_xpath = ".//a[contains(@class, 'author')]//text()"
+        date_xpath = ".//span[contains(@class, 'review-date')]//text()"
+        text_xpath = ".//span[contains(@class, 'review-text')]//text()"
+        vote_xpath = ".//span[contains(@class, 'review-vote')]//text()"
         
+        review_list = []
+        tree = lxml.html.fromstring(html)
+        item_entries = tree.xpath(item_xpath)
+        for entry in item_entries:
+            customer = entry.get('id')
+            star_str = entry.xpath(star_xpath)[0]
+            star = int(re.search('\d+', star_str).group())
+            title = entry.xpath(title_xpath)[0]
+            author = entry.xpath(author_xpath)[0]
+            date_str = entry.xpath(date_xpath)[0].replace('on ', '')
+            date = self._transform_review_date_format(date_str)
+            text = entry.xpath(text_xpath)[0]
+            vote_list = entry.xpath(vote_xpath)
+            if len(vote_list):
+                vote = int(re.search('\d+|One', vote_list[0]).group().replace('One', '1'))
+            else:
+                vote = 0
+            elem = {'customer':customer,'star':star, 'title':title, 'author':author, 
+                    'date':date, 'text':text, 'vote':vote}
+            review_list.append(elem)
+        return review_list
+
+
+    def fetch_reviews_from_page(self, page):
+        url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.first_page_url)
+        html = self.downloader.get_html(url)
+        review_list = self.fetch_reviews_from_html(html)
+        return review_list
+
+
+    def fetch_all_reviews(self):
         lock=threading.Lock()
         download_thread_list = []
-        for page in range(1, total_review_page_number + 1):
-            url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, first_review_page_url)
-            page_download_thread = threading.Thread(target=self.download_html_and_get_reviews, 
+        total_page_number = self.get_total_page_numbers()
+        print('%s pages in total.'  % total_page_number)
+        for page in range(1, total_page_number + 1):
+            url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.first_page_url)
+            page_download_thread = threading.Thread(target=self._fetch_reviews_and_extend_to_review_list, 
                                                     kwargs={'lock':lock, 'url':url})
             download_thread_list.append(page_download_thread)
         
@@ -135,8 +179,8 @@ class GetReviews(object):
             lock.acquire()
             fail_num = len(self.failed_download_pages)
             lock.release()
-            msg = 'pending %s pages, %s pages is downloading, %s pages error' % \
-                  (pending_thread_number, alive_thread_number, fail_num)
+            msg = 'downloading %s pages, pending %s pages, %s pages failed ...' % \
+                  (alive_thread_number, pending_thread_number, fail_num)
             msg_lenth = len(msg)
             output_msg_lenth = max(output_msg_lenth, msg_lenth)
             new_msg = (' '*output_msg_lenth).replace(' '*msg_lenth, msg)
@@ -146,11 +190,17 @@ class GetReviews(object):
                 active_thread_list.append(download_thread_list[0])
                 download_thread_list.pop(0)
             time.sleep(0.5)
-        print('\ndownload finished.')
+        msg = 'html download finished, %s pages downloaded and %s failed.'  % (total_page_number - fail_num, fail_num)
+        msg_lenth = len(msg)
+        new_msg = (' '*output_msg_lenth).replace(' '*msg_lenth, msg)
+        sys.stdout.write('\r%s\n' % new_msg)
+        
+        if self.failed_download_pages:
+            print('Failed to get the following pages:\n%s'  % self.failed_download_pages)
         return self.review_list
-    
 
-    def download_html_and_get_reviews(self, lock, url):
+
+    def _fetch_reviews_and_extend_to_review_list(self, lock, url):
         page_num = int(re.search('pageNumber=(\d+)', url).group(1))
         try:
             html = self.downloader.get_remote_html(url)
@@ -159,92 +209,17 @@ class GetReviews(object):
             self.failed_download_pages.append(page_num)
             lock.release()
             raise Exception(e)
-        reviews_in_html = self.get_review_list_from_html(html)
+        reviews_in_html = self.fetch_reviews_from_html(html)
         lock.acquire()
         self.review_list.extend(reviews_in_html)
         lock.release()
-               
+        
+        
+    def get_failed_page_list(self):
+        return self.failed_download_pages
 
-    def show_reviews_statistics(self):
-        reviews_classified_by_month = self.classify_reviews_by_month(self.review_list)
-        total_review_num = 0
-        star_sum = 0
-        print('%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s'  % \
-             ('month', 'total', 'One', 'Two', 'Three', 'Four', 'Five', 'Avg', 'Star'))
-        for month in sorted(reviews_classified_by_month.keys()):
-            month_str = '%s-%s'  % (month.year, month.month)
-            reviews = reviews_classified_by_month[month]
-            reviews_classified_by_star = self.classify_reviews_by_star(reviews)
-            one_star_num = len(reviews_classified_by_star.get(1, []))
-            two_star_num = len(reviews_classified_by_star.get(2, []))
-            three_star_num = len(reviews_classified_by_star.get(3, []))
-            four_star_num = len(reviews_classified_by_star.get(4, []))
-            five_star_num = len(reviews_classified_by_star.get(5, []))
-            month_total_review_num = len(reviews)
-            month_star_sum = one_star_num + two_star_num*2 + three_star_num*3 + four_star_num*4 + five_star_num*5
-            if month_total_review_num == 0:
-                month_avg_star = 0
-            else:
-                month_avg_star = round(month_star_sum/month_total_review_num, 2)
-            star_sum = star_sum + month_star_sum
-            total_review_num = total_review_num + month_total_review_num
-            if total_review_num == 0:
-                real_review = 0
-            else:
-                real_review = round(star_sum / total_review_num, 1)
-            print('%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s\t%-4s'  % \
-                 (month_str, month_total_review_num, one_star_num, two_star_num, three_star_num, 
-                 four_star_num, five_star_num, month_avg_star, real_review))
-        
-        if self.failed_download_pages:   
-            print('failed download pages:\n%s' % self.failed_download_pages)
-                 
 
-    def get_total_review_page_number_from_html(self, html):
-        tree = lxml.html.fromstring(html)
-        page_butten_list = tree.xpath("//*[@id='cm_cr-pagination_bar']/ul/li//text()")
-        if len(page_butten_list) == 0:
-            return 1
-        page_butten_list = [i.replace(',', '') for i in page_butten_list]
-        page_butten_list = [i for i in page_butten_list if i.strip().isdigit()]
-        page_butten_list = [int(i) for i in page_butten_list]
-        total_review_page_number = max(page_butten_list)
-        return total_review_page_number
-
-        
-    def get_review_list_from_html(self, html):
-        item_xpath = "//div[starts-with(@id, 'customer_review-')]"
-        star_xpath = ".//a[@class='a-link-normal' and starts-with(@href, '/gp/customer-reviews/')]//@title"
-        title_xpath = ".//a[contains(@class, 'review-title')]//text()"
-        author_xpath = ".//a[contains(@class, 'author')]//text()"
-        date_xpath = ".//span[contains(@class, 'review-date')]//text()"
-        text_xpath = ".//span[contains(@class, 'review-text')]//text()"
-        vote_xpath = ".//span[contains(@class, 'review-vote')]//text()"
-        
-        tree = lxml.html.fromstring(html)
-        item_entries = tree.xpath(item_xpath)
-        review_list = []
-        for entry in item_entries:
-            customer = entry.get('id')
-            star_str = entry.xpath(star_xpath)[0]
-            star = int(re.search('\d+', star_str).group())
-            title = entry.xpath(title_xpath)[0]
-            author = entry.xpath(author_xpath)[0]
-            date_str = entry.xpath(date_xpath)[0].replace('on ', '')
-            date = self.transform_review_date_format(date_str)
-            text = entry.xpath(text_xpath)[0]
-            vote_list = entry.xpath(vote_xpath)
-            if len(vote_list):
-                vote = int(re.search('\d+|One', vote_list[0]).group().replace('One', '1'))
-            else:
-                vote = 0
-            elem = {'customer':customer,'star':star, 'title':title, 'author':author, 
-                    'date':date, 'text':text, 'vote':vote}
-            review_list.append(elem)
-        return review_list
-        
-        
-    def transform_review_date_format(self, date):
+    def _transform_review_date_format(self, date):
         ''' transform ''March 25, 2017' to datetime.datetime(2017, 3, 25) '''
         date = date.replace('January', '1')
         date = date.replace('February', '2')
@@ -264,250 +239,284 @@ class GetReviews(object):
         elem = [int(i) for i in elem]
         return datetime.datetime(elem[2], elem[0], elem[1])
         
+
+
+class ReviewsFilter(object):
+    def __init__(self, review_list):
+        self.review_list = review_list
+        self.review_list_classified_by_month = None
+        self.review_list_classified_by_star = None
+                 
         
-    def classify_reviews_by_month(self, review_list):
-        ''' sort reviews by month 
-        Argument:
-            review_list(list): review_list
+    def _get_review_list_classified_by_month(self):
+        ''' classify reviews by month 
         Returns(dict):
-            {2017.3:[a list of reviews during 2017.3], ...}
+            {datetime.datetime(2017, 3, 1):[a list of reviews during 2017.3], ...}
         '''
-        reviews_classified_by_month = {}
-        for review in review_list:
+        if self.review_list_classified_by_month is not None:
+            return self.review_list_classified_by_month
+
+        review_list_classified_by_month = {}
+        for review in self.review_list:
             date = review['date']
-            # month = date.year + date.month * (0.1**len(str(date.month)))    # 2017.3, 2016.12
             month = datetime.datetime(date.year, date.month, 1)
-            if month not in reviews_classified_by_month:
-                reviews_classified_by_month[month] = []
-            reviews_classified_by_month[month].append(review)
-        return reviews_classified_by_month
-            
-            
-    def classify_reviews_by_star(self, review_list):
-        ''' sort reviews by star 
-        Argument:
-            review_list(list): review_list
+            if month not in review_list_classified_by_month:
+                review_list_classified_by_month[month] = []
+            review_list_classified_by_month[month].append(review)
+        self.review_list_classified_by_month = review_list_classified_by_month
+        return review_list_classified_by_month
+
+
+    def _get_review_list_classified_by_star(self):
+        ''' classify reviews by star 
         Returns(dict):
-            {1:[1_star_review_list], ...}
+            {1:[a list of reviews with star=1], ...}
         '''
-        reviews_classified_by_star = {}
-        for review in review_list:
+        if self.review_list_classified_by_star is not None:
+            return self.review_list_classified_by_star
+
+        review_list_classified_by_star = {}
+        for review in self.review_list:
             star = review['star']
-            if star not in reviews_classified_by_star:
-                reviews_classified_by_star[star] = []
-            reviews_classified_by_star[star].append(review)
-        return reviews_classified_by_star
+            if star not in review_list_classified_by_star:
+                review_list_classified_by_star[star] = []
+            review_list_classified_by_star[star].append(review)
+        self.review_list_classified_by_star = review_list_classified_by_star
+        return review_list_classified_by_star
 
 
-    def sort_review_list_by_date(self, review_list):
+    def get_month_list(self):
+        month_list = self._get_review_list_classified_by_month().keys()
+        month_list = list(month_list)
+        month_list.sort()
+        return month_list
+
+
+    def get_reviews_by_month(self, month):
+        month = datetime.datetime(month.year, month.month, 1)
+        review_list = self._get_review_list_classified_by_month().get(month, [])
+        return review_list
+            
+
+    def get_reviews_by_star(self, star):
+        review_list = self._get_review_list_classified_by_star().get(star, [])
+        return review_list
+
+
+    def sort_reviews_by_date(self, reverse=True):
         list_sorted = []
-        date_list = list(set([i['date'] for i in review_list]))
+        date_list = list(set([i['date'] for i in self.review_list]))
         date_list.sort()
-        date_list.reverse()
+        if reverse:
+            date_list.reverse()
         for date in date_list:
-            review_list_with_current_date = [i for i in review_list if i['date'] == date] 
+            review_list_with_current_date = [i for i in self.review_list if i['date'] == date] 
             list_sorted.extend(review_list_with_current_date)
+        self.review_list = list_sorted
         return list_sorted
 
 
-    def sort_review_list_by_vote(self, review_list):
+    def sort_reviews_by_vote(self, reverse=True):
         list_sorted = []
-        vote_list = list(set([i['vote'] for i in review_list]))
+        vote_list = list(set([i['vote'] for i in self.review_list]))
         vote_list.sort()
-        vote_list.reverse()
+        if reverse:
+            vote_list.reverse()
         for vote in vote_list:
-            review_list_with_current_vote = [i for i in review_list if i['vote'] == vote] 
+            review_list_with_current_vote = [i for i in self.review_list if i['vote'] == vote] 
             list_sorted.extend(review_list_with_current_vote)
+        self.review_list = list_sorted
         return list_sorted
 
 
-    def save_review_statistics(self):
-        reviews_classified_by_month = self.classify_reviews_by_month(self.review_list)
-        total_review_num = 0
-        star_sum = 0
-        sheet_statistics = self.result_book.add_sheet('Statistics')
-        row = column = 0
-        # sheet_statistics.write(row, column, self.product_name)
-        # row = row + 1
-        # column = 0
-        for i in ('month', 'total num', 'One', 'Two', 'Three', 'Four', 'Five', 'month avg star', 'total avg star'):
-            sheet_statistics.write(row, column, i)
+class ReviewsStatisticsAndSaver(object):
+    def __init__(self, review_list):
+        self.review_filter = ReviewsFilter(review_list)
+        self.result_book = xlwt.Workbook()      # an excel book to save result
+        self.statistic_result = None
+        
+    
+    def _write_row_elements_into_data_sheet(self, sheet, row, column, elements):
+        for elem in elements:
+            sheet.write(row, column, elem)
             column = column + 1
         row = row + 1
         column = 0
-        for month in sorted(reviews_classified_by_month.keys()):
+        return (row, column)
+    
+    
+    def _get_review_elements(self, review):
+        ''' return review dict's values sorted by ('Date', 'Author', 'Star', 'Vote Number', 'Comment Title', 'Comment Text') '''
+        date = review['date']
+        date_str = '%s-%s'  % (date.year, date.month)
+        author = review['author']
+        star = review['star']
+        vote = review['vote']
+        title = review['title']
+        text = review['text']
+        return (date_str, author, star, vote, title, text)
+                    
+    
+    def get_monthly_statistics(self):
+        header = ('Month', 'Month num', 'Total num', 'One', 'Two', 'Three', 'Four', 'Five', 'Month Avg', 'Total Avg')
+        if self.statistic_result is not None:
+            return self.statistic_result
+        else:
+            self.statistic_result = []
+            self.statistic_result.append(header)
+         
+        total_star_sum = total_review_num = 0
+        month_list = self.review_filter.get_month_list()
+        for month in sorted(month_list):
             month_str = '%s-%s'  % (month.year, month.month)
-            reviews = reviews_classified_by_month[month]
-            reviews_classified_by_star = self.classify_reviews_by_star(reviews)
-            one_star_num = len(reviews_classified_by_star.get(1, []))
-            two_star_num = len(reviews_classified_by_star.get(2, []))
-            three_star_num = len(reviews_classified_by_star.get(3, []))
-            four_star_num = len(reviews_classified_by_star.get(4, []))
-            five_star_num = len(reviews_classified_by_star.get(5, []))
+            reviews = self.review_filter.get_reviews_by_month(month)
+            reviews_filter = ReviewsFilter(reviews)
+            one_star_num = len(reviews_filter.get_reviews_by_star(1))
+            two_star_num = len(reviews_filter.get_reviews_by_star(2))
+            three_star_num = len(reviews_filter.get_reviews_by_star(3))
+            four_star_num = len(reviews_filter.get_reviews_by_star(4))
+            five_star_num = len(reviews_filter.get_reviews_by_star(5))
             month_total_review_num = len(reviews)
             month_star_sum = one_star_num + two_star_num*2 + three_star_num*3 + four_star_num*4 + five_star_num*5
             if month_total_review_num == 0:
                 month_avg_star = 0
             else:
                 month_avg_star = round(month_star_sum/month_total_review_num, 2)
-            star_sum = star_sum + month_star_sum
+            total_star_sum = total_star_sum + month_star_sum
             total_review_num = total_review_num + month_total_review_num
             if total_review_num == 0:
-                real_review = 0
+                total_avg_star = 0
             else:
-                real_review = round(star_sum / total_review_num, 1)
-            for i in (month_str, month_total_review_num, one_star_num, two_star_num, three_star_num, \
-                      four_star_num, five_star_num, month_avg_star, real_review):
-                sheet_statistics.write(row, column, i)
-                column = column + 1
-            row = row + 1
-            column = 0
-        
-        if self.failed_download_pages:   
-            sheet_statistics.write(row, column, 'failed download pages')
-            column = column + 1
-            sheet_statistics.write(row, column, self.failed_download_pages)
-            ow = row + 1
-            column = 0
+                total_avg_star = round(total_star_sum / total_review_num, 1)
+            
+            elem = (month_str, month_total_review_num, total_review_num, one_star_num, two_star_num, 
+                    three_star_num, four_star_num, five_star_num, month_avg_star, total_avg_star)
+            self.statistic_result.append(elem)
+        return self.statistic_result
+                 
+    
+    def show_statistics(self):
+        result = self.get_monthly_statistics()
+        print('--'*50)
+        for line in result:
+            for i in line:
+                print('%-10s'  % i, end='')
+            print('')
+        print('--'*50)
+            
+    def _save_statistics(self):
+        sheet = self.result_book.add_sheet('Statistics')
+        row = column = 0
+        result = self.get_monthly_statistics()
+        for line in result:
+            row, column = self._write_row_elements_into_data_sheet(sheet, row, column, line)
+            
 
-
-    def save_all_reviews_text(self):
+    def _save_all_reviews_sorted_by_date(self):
         ''' save all the review items into a sheet '''
-        sheet_all_reviews = self.result_book.add_sheet('All Reviews')
-        sheet_header = ('date', 'author', 'star', 'vote', 'title', 'text')
+        sheet = self.result_book.add_sheet('All Reviews')
+        sheet_header = ('Date', 'Author', 'Star', 'Vote Number', 'Comment Title', 'Comment Text')
         row = column = 0
-        for i in sheet_header:
-            sheet_all_reviews.write(row, column, i)
-            column = column + 1
-        row = row + 1
-        column = 0
-        review_list = self.sort_review_list_by_date(self.review_list)
-        for review_item in review_list:
-            date = review_item['date']
-            date_str = '%s-%s-%s'  % (date.year, date.month, date.day)
-            sheet_all_reviews.write(row, column, date_str)
-            column = column + 1
-            sheet_all_reviews.write(row, column, review_item['author'])
-            column = column + 1
-            sheet_all_reviews.write(row, column, review_item['star'])
-            column = column + 1
-            sheet_all_reviews.write(row, column, review_item['vote'])
-            column = column + 1
-            sheet_all_reviews.write(row, column, review_item['title'])
-            column = column + 1
-            sheet_all_reviews.write(row, column, review_item['text'])
+        row, column = self._write_row_elements_into_data_sheet(sheet, row, column, sheet_header)
+        all_reviews = self.review_filter.sort_reviews_by_date()
+        for review in all_reviews:
+            elements = self._get_review_elements(review)
+            row, column = self._write_row_elements_into_data_sheet(sheet, row, column, elements)
+        
 
-            row = row + 1
-            column = 0
-
-
-    def save_reviews_by_star(self):
+    def _save_reviews_classified_by_star(self):
         ''' save reviews with diffent star into differnt sheet '''
-        reviews_classified_by_star = self.classify_reviews_by_star(self.review_list)
-        sheet_header = ('date', 'author', 'star', 'vote', 'title', 'text')
-        for star, reviews in reviews_classified_by_star.items():
-            sheet_by_star = self.result_book.add_sheet('%s Star' % star)
+        sheet_header = ('Date', 'Author', 'Star', 'Vote Number', 'Comment Title', 'Comment Text')
+        for star in (1, 2, 3, 4, 5):
+            sheet = self.result_book.add_sheet('%s Star' % star)
             row = column = 0
-            for i in sheet_header:
-                sheet_by_star.write(row, column, i)
-                column = column + 1
-            row = row + 1
-            column = 0
-            reviews = self.sort_review_list_by_date(reviews)
-            for review_item in reviews:
-                date = review_item['date']
-                date_str = '%s-%s-%s'  % (date.year, date.month, date.day)
-                sheet_by_star.write(row, column, date_str)
-                column = column + 1
-                sheet_by_star.write(row, column, review_item['author'])
-                column = column + 1
-                sheet_by_star.write(row, column, review_item['star'])
-                column = column + 1
-                sheet_by_star.write(row, column, review_item['vote'])
-                column = column + 1
-                sheet_by_star.write(row, column, review_item['title'])
-                column = column + 1
-                sheet_by_star.write(row, column, review_item['text'])
+            row, column = self._write_row_elements_into_data_sheet(sheet, row, column, sheet_header)
+            reviews = self.review_filter.get_reviews_by_star(star)
+            for review in reviews:
+                elements = self._get_review_elements(review)
+                row, column = self._write_row_elements_into_data_sheet(sheet, row, column, elements)
+        
 
-                row = row + 1
-                column = 0
-
-
-    def save_most_helpful_reviews(self):
-        review_list = self.sort_review_list_by_vote(self.review_list)
-        sheet_by_vote = self.result_book.add_sheet('Most helpful')
-        sheet_header = ('date', 'author', 'star', 'vote', 'title', 'text')
+    def _save_most_helpful_reviews(self, min_vote=5):
+        sheet = self.result_book.add_sheet('Most Helpful')
+        sheet_header = ('Date', 'Author', 'Star', 'Vote Number', 'Comment Title', 'Comment Text')
         row = column = 0
-        for i in sheet_header:
-            sheet_by_vote.write(row, column, i)
-            column = column + 1
-        row = row + 1
-        column = 0
-        for review_item in review_list:
-            vote = review_item['vote']
-            if vote < 5:
+        row, column = self._write_row_elements_into_data_sheet(sheet, row, column, sheet_header)
+        reviews = self.review_filter.sort_reviews_by_vote()
+        for review in reviews:
+            if review['vote'] < min_vote:
                 break
-            date = review_item['date']
-            date_str = '%s-%s-%s'  % (date.year, date.month, date.day)
-            sheet_by_vote.write(row, column, date_str)
-            column = column + 1
-            sheet_by_vote.write(row, column, review_item['author'])
-            column = column + 1
-            sheet_by_vote.write(row, column, review_item['star'])
-            column = column + 1
-            sheet_by_vote.write(row, column, review_item['vote'])
-            column = column + 1
-            sheet_by_vote.write(row, column, review_item['title'])
-            column = column + 1
-            sheet_by_vote.write(row, column, review_item['text'])
+            elements = self._get_review_elements(review)
+            row, column = self._write_row_elements_into_data_sheet(sheet, row, column, elements)
+            
 
-            row = row + 1
-            column = 0
-
-
-    def save_reviews_to_excel(self, dut_name=None):
-        time_stap = time.strftime('%Y%m%d', time.localtime())
-        if not dut_name:
-            save_name = 'Reviews_%s_%s.xls'  % (self.product_name, time_stap)
+    def save_all_to_excel(self, product_name=None):
+        date_stap = time.strftime('%Y%m%d', time.localtime())
+        time_stap = time.strftime('%H%M%S', time.localtime())
+        if not product_name:
+            save_name = 'Reviews_%s_%s.xls'  % (date_stap, time_stap)
         else:
-            save_name = 'Reviews_%s_%s.xls'  % (dut_name, time_stap)
-        self.save_review_statistics()
-        self.save_all_reviews_text()
-        self.save_reviews_by_star()
-        self.save_most_helpful_reviews()
+            save_name = 'Reviews_%s_%s.xls'  % (product_name, date_stap)
+        self._save_statistics()
+        self._save_all_reviews_sorted_by_date()
+        self._save_reviews_classified_by_star()
+        self._save_most_helpful_reviews()
         self.result_book.save(save_name)
 
 
 def get_reviews_for_cable_modem():
+    ''' test '''
     cr700_url = 'https://www.amazon.com/TP-Link-Certified-Communications-Archer-CR700/dp/B012I96J3W/ref=sr_1_1?ie=UTF8&qid=1490972370&sr=8-1&keywords=cr700'
     tc7610_7620_url = 'https://www.amazon.com/TP-Link-343Mbps-Certified-Spectrum-TC-7610-E/dp/B01CH8ZNJ0/ref=sr_1_1?ie=UTF8&qid=1491060700&sr=8-1&keywords=tc-7610'
     tcw7960_url = 'https://www.amazon.com/TP-Link-Cable-Modem-Router-Communications/dp/B01EO5A3RQ/ref=sr_1_1?ie=UTF8&qid=1491061952&sr=8-1&keywords=tc-w7960'
     tc7620_only_url = 'https://www.amazon.com/TP-Link-Download-Certified-Communications-TC-7620/product-reviews/B01CVOLKKQ/ref=cm_cr_arp_d_viewopt_fmt?ie=UTF8&reviewerType=avp_only_reviews&formatType=current_format&pageNumber=1&sortBy=helpful'
     tc7610_only_url = 'https://www.amazon.com/TP-Link-343Mbps-Certified-Spectrum-TC-7610/product-reviews/B01CH8ZNJ0/ref=cm_cr_arp_d_viewopt_fmt?ie=UTF8&reviewerType=all_reviews&pageNumber=1&formatType=current_format'
     
-    for url, dut_name in [(cr700_url, 'CR700'), (tc7610_7620_url, 'TC-7610_7620'), (tcw7960_url, 'TC-W7960'), 
+    for url, product_name in [(cr700_url, 'CR700'), (tc7610_7620_url, 'TC-7610_7620'), (tcw7960_url, 'TC-W7960'), 
                           (tc7620_only_url, 'TC-7620'), (tc7610_only_url, 'TC-7610')]:
-        print('Start at %s'  % datetime.datetime.now())
-        master = GetReviews()
-        review_list = master.get_all_reviews(url)
-        master.show_reviews_statistics()
-        master.save_reviews_to_excel(dut_name=dut_name)
-        print('Finish at %s\n'  % datetime.datetime.now())
-        input()
+        start_time = datetime.datetime.now()
+        print('Start at %s'  % str(start_time).split('.')[0])
+        fetcher = ReviewsFecher(url)
+        if not product_name.strip():
+            product_name = fetcher.get_product_name()
+        print('Product: %s'  % product_name)
+        review_list = fetcher.fetch_all_reviews()
+        master = ReviewsStatisticsAndSaver(review_list)
+        master.save_all_to_excel(product_name)
+        master.show_statistics()
+        end_time = datetime.datetime.now()
+        duration = end_time - start_time
+        total_seconds = duration.days*24*3600 + duration.seconds
+        hours = int(total_seconds/3600)
+        mins = int((total_seconds - hours*3600) / 60)
+        seconds = total_seconds - hours*3600 - mins*60
+        print('End at %s, duration is %sh %smin %ss.\n'  % (str(end_time).split('.')[0], hours, mins, seconds))
 
 
 if __name__=="__main__":
     # get_reviews_for_cable_modem()
-
-    dut_name = input('dut name: ')
-    url = input('product url or reviews url: ')
-    print('Start at %s'  % datetime.datetime.now())
-    master = GetReviews()
-    review_list = master.get_all_reviews(url)
-    master.show_reviews_statistics()
-    master.save_reviews_to_excel(dut_name)
-    print('Finish at %s\n'  % datetime.datetime.now())
-    input()
+    product_name = input('Product name(optional): ').strip()
+    url = input('Product page url or reviews page url: ').strip()
+    # url = 'https://www.amazon.com/TP-Link-Certified-Communications-Archer-CR700/dp/B012I96J3W/ref=sr_1_1?ie=UTF8&qid=1490972370&sr=8-1&keywords=cr700'
+    # product_name = ''
+    start_time = datetime.datetime.now()
+    print('Start at %s'  % str(start_time).split('.')[0])
+    fetcher = ReviewsFecher(url)
+    if not product_name.strip():
+        product_name = fetcher.get_product_name()
+    print('Product: %s'  % product_name)
+    review_list = fetcher.fetch_all_reviews()
+    master = ReviewsStatisticsAndSaver(review_list)
+    master.save_all_to_excel(product_name)
+    master.show_statistics()
+    end_time = datetime.datetime.now()
+    duration = end_time - start_time
+    total_seconds = duration.days*24*3600 + duration.seconds
+    hours = int(total_seconds/3600)
+    mins = int((total_seconds - hours*3600) / 60)
+    seconds = total_seconds - hours*3600 - mins*60
+    print('End at %s, duration is %sh %smin %ss.'  % (str(end_time).split('.')[0], hours, mins, seconds))
+     
 
     
         
