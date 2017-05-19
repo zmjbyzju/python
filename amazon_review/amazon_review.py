@@ -21,12 +21,12 @@ import socket
 import xlwt
 
 MAX_CONNECTION = 100
-CONNECTION_TIMEOUT = 5
+CONNECTION_TIMEOUT = 10
 CONNECTION_RETRIES = 10
 
 socket.setdefaulttimeout(CONNECTION_TIMEOUT)
 
-class HtmlDownloadMaster(object):
+class HTMLDownloadMaster(object):
 
     COOKIE_FILE_NAME = 'cookie.txt'
     REQUEST_HEADER = {'User-Agent':"Mozilla/5.0 (X11; Linux x86_64; rv:45.0) Gecko/20100101 Firefox/45.0",
@@ -35,22 +35,18 @@ class HtmlDownloadMaster(object):
                       'Accept-Encoding':'gzip, deflate',
                       'Connection':'keep-alive',
                       'DNT':'1',
-                      'Host': 'www.amazon.cn'}
+                      'Host': 'www.amazon.com'}
 
     def __init__(self):
-        cookiejar = http.cookiejar.MozillaCookieJar(self.COOKIE_FILE_NAME)
-        if os.path.exists(self.COOKIE_FILE_NAME):
-            cookiejar.load(self.COOKIE_FILE_NAME, ignore_discard=True, ignore_expires=True)
-        handler = urllib.request.HTTPCookieProcessor(cookiejar)
-        opener = urllib.request.build_opener(handler)
-        headers = [i for i  in self.REQUEST_HEADER.items()]
-        opener.addheaders = headers
-
-        self.cookiejar = cookiejar
-        self.opener = opener
         self.cookie_is_saved = False
-        
-   
+        self.cookiejar = http.cookiejar.MozillaCookieJar(self.COOKIE_FILE_NAME)
+        if os.path.exists(self.COOKIE_FILE_NAME):
+            self.cookiejar.load(self.COOKIE_FILE_NAME, ignore_discard=True, ignore_expires=True)
+        handler = urllib.request.HTTPCookieProcessor(self.cookiejar)
+        self.opener = urllib.request.build_opener(handler)
+        headers = [i for i  in self.REQUEST_HEADER.items()]
+        self.opener.addheaders = headers
+
     def get_remote_html(self, url):
         for i in range(CONNECTION_RETRIES):
             try:
@@ -70,33 +66,35 @@ class HtmlDownloadMaster(object):
         return html
 
 
-class ReviewsFecher(object):
+class GetReviews(object):
+    ''' fetch reviews from url '''
     def __init__(self, url):
-        self.downloader = HtmlDownloadMaster()
+        self.downloader = HTMLDownloadMaster()
         self.review_list = []
         self.failed_download_pages = []
 
-
-        url_part_see_all_reviews = 'ref=cm_cr_dp_d_show_all_top?ie=UTF8&reviewerType=avp_only_reviews'
+        _str_sort_by_helpful = 'sortBy=helpful'
+        _str_sort_by_recent = 'sortBy=recent'
+        _str_all_formats = 'formatType=all_formats'
+        _str_current_format = 'formatType=current_format'
         url_part_sort_by_recent = 'ref=cm_cr_arp_d_viewopt_fmt?ie=UTF8&reviewerType=avp_only_reviews&formatType=all_formats&pageNumber=1&sortBy=recent'
-        url_part_sort_by_helpful = url_part_sort_by_recent.replace('sortBy=recent', 'sortBy=helpful')
-        url_part_sort_by_current = url_part_sort_by_recent.replace('formatType=all_formats', 'formatType=current_format')
-        if 'product-reviews' in url:
-            first_page_url = url.replace(url_part_sort_by_helpful, url_part_sort_by_recent)
+        url_part_sort_by_recent_uk = 'ref=cm_cr_arp_d_viewopt_srt?ie=UTF8&reviewerType=all_reviews&showViewpoints=1&sortBy=recent&pageNumber=1'
+        
+        if 'product-reviews' in url and re.search('pageNumber=\d+', url):
+            _base_url = url.replace(_str_sort_by_helpful, _str_sort_by_recent)
         else:
-            print('Getting product page ...')
-            html = self.downloader.get_remote_html(url)
-            tree = lxml.html.fromstring(html)
-            xpath = "//a[@id='dp-summary-see-all-reviews']//@href"
-            see_all_reviews_relative_url = tree.xpath(xpath)[0]
-            see_all_reviews_url = "http://www.amazon.com%s"  % see_all_reviews_relative_url
-            first_page_url = see_all_reviews_url.replace(url_part_see_all_reviews, url_part_sort_by_recent)
-        self.first_page_url = first_page_url
+            if 'amazon.co.uk' in url:
+                product_id = re.search('(/(dp)|(/product-reviews))/(\w+)/', url).group(4)
+                _base_url = 'https://www.amazon.co.uk/product-reviews/%s/%s'  % (product_id, url_part_sort_by_recent_uk)
+            else:
+                _url_for_review = url.replace('/dp/', '/product-reviews/')
+                _base_url = '%s%s'  % (_url_for_review.split('ref=')[0], url_part_sort_by_recent)  
+        self.base_url = _base_url
 
 
     def get_total_page_numbers(self):
         print('getting first review page ...')
-        first_page_html = self.downloader.get_remote_html(self.first_page_url)
+        first_page_html = self.downloader.get_remote_html(self.base_url)
         tree = lxml.html.fromstring(first_page_html)
         page_butten_list = tree.xpath("//*[@id='cm_cr-pagination_bar']/ul/li//text()")
         if len(page_butten_list) == 0:
@@ -109,7 +107,10 @@ class ReviewsFecher(object):
 
 
     def get_product_name(self):
-        product_name = self.first_page_url.split('/')[3]
+        if 'amazon.co.uk' in self.base_url:
+            product_name = self.base_url.split('/')[4]
+        else:
+            product_name = self.base_url.split('/')[3]
         return product_name
 
 
@@ -145,8 +146,8 @@ class ReviewsFecher(object):
         return review_list
 
 
-    def fetch_reviews_from_page(self, page):
-        url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.first_page_url)
+    def fetch_reviews_from_page_number(self, page):
+        url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.base_url)
         html = self.downloader.get_remote_html(url)
         review_list = self.fetch_reviews_from_html(html)
         return review_list
@@ -158,7 +159,7 @@ class ReviewsFecher(object):
         total_page_number = self.get_total_page_numbers()
         print('%s pages in total.'  % total_page_number)
         for page in range(1, total_page_number + 1):
-            url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.first_page_url)
+            url = re.sub('pageNumber=\d+', 'pageNumber=%s' % page, self.base_url)
             page_download_thread = threading.Thread(target=self._fetch_reviews_and_extend_to_review_list, 
                                                     kwargs={'lock':lock, 'url':url})
             download_thread_list.append(page_download_thread)
@@ -215,6 +216,11 @@ class ReviewsFecher(object):
 
     def _transform_review_date_format(self, date):
         ''' transform ''March 25, 2017' to datetime.datetime(2017, 3, 25) '''
+        
+        # for uk, transform '11 March 2016' to 'March 11, 2016'
+        if re.match('\A\d+ \w+ \d+\Z', date) is not None:
+            date_split = date.split(' ')
+            date = '%s %s, %s'  % (date_split[1], date_split[0], date_split[2])  
         date = date.replace('January', '1')
         date = date.replace('February', '2')
         date = date.replace('March', '3')
@@ -228,12 +234,9 @@ class ReviewsFecher(object):
         date = date.replace('November', '11')
         date = date.replace('December', '12')
         date = date.replace(',', '')
-        
         elem = re.split(' +', date)
         elem = [int(i) for i in elem]
         return datetime.datetime(elem[2], elem[0], elem[1])
-        
-
 
 class ReviewsFilter(object):
     def __init__(self, review_list):
@@ -249,7 +252,6 @@ class ReviewsFilter(object):
         '''
         if self.review_list_classified_by_month is not None:
             return self.review_list_classified_by_month
-
         review_list_classified_by_month = {}
         for review in self.review_list:
             date = review['date']
@@ -268,7 +270,6 @@ class ReviewsFilter(object):
         '''
         if self.review_list_classified_by_star is not None:
             return self.review_list_classified_by_star
-
         review_list_classified_by_star = {}
         for review in self.review_list:
             star = review['star']
@@ -285,17 +286,14 @@ class ReviewsFilter(object):
         month_list.sort()
         return month_list
 
-
     def get_reviews_by_month(self, month):
         month = datetime.datetime(month.year, month.month, 1)
         review_list = self._get_review_list_classified_by_month().get(month, [])
         return review_list
             
-
     def get_reviews_by_star(self, star):
         review_list = self._get_review_list_classified_by_star().get(star, [])
         return review_list
-
 
     def sort_reviews_by_date(self, reverse=True):
         list_sorted = []
@@ -309,7 +307,6 @@ class ReviewsFilter(object):
         self.review_list = list_sorted
         return list_sorted
 
-
     def sort_reviews_by_vote(self, reverse=True):
         list_sorted = []
         vote_list = list(set([i['vote'] for i in self.review_list]))
@@ -322,8 +319,7 @@ class ReviewsFilter(object):
         self.review_list = list_sorted
         return list_sorted
 
-
-class ReviewsStatisticsAndSaver(object):
+class StatisticsAndSave(object):
     def __init__(self, review_list):
         self.review_filter = ReviewsFilter(review_list)
         self.result_book = xlwt.Workbook()      # an excel book to save result
@@ -358,7 +354,6 @@ class ReviewsStatisticsAndSaver(object):
         else:
             self.statistic_result = []
             self.statistic_result.append(header)
-         
         total_star_sum = total_review_num = 0
         month_list = self.review_filter.get_month_list()
         for month in sorted(month_list):
@@ -443,7 +438,6 @@ class ReviewsStatisticsAndSaver(object):
             elements = self._get_review_elements(review)
             row, column = self._write_row_elements_into_data_sheet(sheet, row, column, elements)
             
-
     def save_all_to_excel(self, product_name=None):
         date_stap = time.strftime('%Y%m%d', time.localtime())
         time_stap = time.strftime('%H%M%S', time.localtime())
@@ -457,20 +451,20 @@ class ReviewsStatisticsAndSaver(object):
         self._save_most_helpful_reviews()
         self.result_book.save(save_name)
 
-
-if __name__=="__main__":
+        
+def get_reviews():
     product_name = input('Product name(optional): ').strip()
     url = input('Product page url or reviews page url: ').strip()
     # product_name = ''
     # url = 'https://www.amazon.com/Apple-Factory-Unlocked-Internal-Smartphone/dp/B00NQGP42Y/ref=sr_1_4?s=wireless&ie=UTF8&qid=1491201041&sr=1-4&keywords=iphone'
     start_time = datetime.datetime.now()
     print('Start at %s'  % str(start_time).split('.')[0])
-    fetcher = ReviewsFecher(url)
+    fetcher = GetReviews(url)
     if not product_name.strip():
         product_name = fetcher.get_product_name()
     print('Product: %s'  % product_name)
     review_list = fetcher.fetch_all_reviews()
-    master = ReviewsStatisticsAndSaver(review_list)
+    master = StatisticsAndSave(review_list)
     master.save_all_to_excel(product_name)
     master.show_statistics()
     end_time = datetime.datetime.now()
@@ -481,6 +475,7 @@ if __name__=="__main__":
     seconds = total_seconds - hours*3600 - mins*60
     print('End at %s, duration is %sh %smin %ss.'  % (str(end_time).split('.')[0], hours, mins, seconds))
      
-
+if __name__=="__main__":
+    while True:
+        get_reviews()
     
-        
